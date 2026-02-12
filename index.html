@@ -32,13 +32,15 @@ html,body{width:100%;height:100%;overflow:hidden;background:#111;touch-action:no
 <div id="overlay"><h1>Fortress Defense</h1><p>Protect the princess from being kidnapped!<br>Build walls by day, place turrets by night.<br>Survive 5 nights to win.</p><button id="bStart">START</button></div>
 <script>
 const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
-const COLS=12,ROWS=20;
-let TILE,offX=0,offY=0;
+const COLS=20,ROWS=32;
+const BASE_TILE=16;
+let TILE=BASE_TILE,offX=0,offY=0;
+let camX=0,camY=0,zoom=1,minZoom=.5,maxZoom=2;
 let grid=[],entities=[],projectiles=[],floatingTexts=[];
 let phase='day',nightNum=0,gold=50,score=0;
 let selectedTool='wall';
 let flowToPrincess=null,flowToPortals=null;
-let princessPos={x:6,y:10},princessHome={x:6,y:10};
+let princessPos={x:10,y:16},princessHome={x:10,y:16};
 let princessGrabbed=false,princessCarrier=null;
 let waveTimer=0,waveCount=0,wavesTotal=0,nightActive=false;
 let gameState='title'; // title, playing, win, lose
@@ -47,11 +49,13 @@ let spawnQueue=[];
 // --- Resize ---
 function resize(){
  const hud=document.getElementById('hud').offsetHeight||60;
- const w=window.innerWidth,h=window.innerHeight-hud;
- TILE=Math.floor(Math.min(w/COLS,h/ROWS));
- canvas.width=TILE*COLS;canvas.height=TILE*ROWS;
- offX=(w-canvas.width)/2;
- canvas.style.marginTop='0';
+ canvas.width=window.innerWidth;
+ canvas.height=window.innerHeight-hud;
+ // fit default zoom so map fills screen width
+ const fitZoom=Math.min(canvas.width/(COLS*BASE_TILE),canvas.height/(ROWS*BASE_TILE));
+ minZoom=fitZoom*.8;maxZoom=fitZoom*3;
+ if(zoom<minZoom)zoom=minZoom;
+ if(!window._zoomInit){zoom=fitZoom;camX=(COLS*BASE_TILE)/2;camY=(ROWS*BASE_TILE)/2;window._zoomInit=true;}
 }
 window.addEventListener('resize',resize);
 
@@ -66,7 +70,7 @@ function initGrid(){
  // scatter terrain
  const terrainTypes=['tree','rock','water'];
  let placed=0;
- while(placed<30){
+ while(placed<60){
   const x=Math.random()*COLS|0,y=Math.random()*ROWS|0;
   if(grid[y][x]!=='empty')continue;
   // keep a clear zone around princess
@@ -355,8 +359,11 @@ const COLORS={
 
 function render(){
  const night=phase==='night';
+ TILE=BASE_TILE*zoom;
  ctx.fillStyle=night?'#1a2a1a':'#3a6a2a';
  ctx.fillRect(0,0,canvas.width,canvas.height);
+ ctx.save();
+ ctx.translate(canvas.width/2-camX*zoom,canvas.height/2-camY*zoom);
 
  // tiles
  for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++){
@@ -491,6 +498,7 @@ function render(){
   ctx.fillText(f.text,f.x*TILE,f.y*TILE);
   ctx.globalAlpha=1;
  }
+ ctx.restore();
 }
 
 function drawPrincess(cx,cy){
@@ -524,15 +532,79 @@ function updateButtons(){
  document.getElementById('bNight').style.display=phase==='day'?'':'none';
 }
 
-// --- Touch/Click ---
-canvas.addEventListener('pointerdown',e=>{
- if(gameState!=='playing')return;
+// --- Touch/Click & Camera ---
+function screenToGrid(sx,sy){
  const rect=canvas.getBoundingClientRect();
- const tx=(e.clientX-rect.left)/TILE|0;
- const ty=(e.clientY-rect.top)/TILE|0;
+ const wx=(sx-rect.left-canvas.width/2)/zoom+camX;
+ const wy=(sy-rect.top-canvas.height/2)/zoom+camY;
+ return{x:wx/BASE_TILE|0,y:wy/BASE_TILE|0};
+}
+
+let touches={},lastPinchDist=0,isPanning=false,panStart={x:0,y:0},camStart={x:0,y:0};
+let pointerDownTime=0,pointerDownPos={x:0,y:0};
+
+canvas.addEventListener('pointerdown',e=>{
+ touches[e.pointerId]={x:e.clientX,y:e.clientY};
+ const tkeys=Object.keys(touches);
+ if(tkeys.length===1){
+  isPanning=false;pointerDownTime=Date.now();
+  pointerDownPos={x:e.clientX,y:e.clientY};
+  panStart={x:e.clientX,y:e.clientY};camStart={x:camX,y:camY};
+ }
+ if(tkeys.length===2){
+  isPanning=true;
+  const t=tkeys.map(k=>touches[k]);
+  lastPinchDist=Math.hypot(t[0].x-t[1].x,t[0].y-t[1].y);
+  panStart={x:(t[0].x+t[1].x)/2,y:(t[0].y+t[1].y)/2};camStart={x:camX,y:camY};
+ }
+});
+
+canvas.addEventListener('pointermove',e=>{
+ if(!touches[e.pointerId])return;
+ touches[e.pointerId]={x:e.clientX,y:e.clientY};
+ const tkeys=Object.keys(touches);
+ if(tkeys.length===2){
+  isPanning=true;
+  const t=tkeys.map(k=>touches[k]);
+  const dist=Math.hypot(t[0].x-t[1].x,t[0].y-t[1].y);
+  if(lastPinchDist>0){
+   zoom*=dist/lastPinchDist;
+   zoom=Math.max(minZoom,Math.min(maxZoom,zoom));
+  }
+  lastPinchDist=dist;
+  // pan with midpoint
+  const mid={x:(t[0].x+t[1].x)/2,y:(t[0].y+t[1].y)/2};
+  camX=camStart.x-(mid.x-panStart.x)/zoom;
+  camY=camStart.y-(mid.y-panStart.y)/zoom;
+ }else if(tkeys.length===1){
+  const dx=e.clientX-panStart.x,dy=e.clientY-panStart.y;
+  if(Math.abs(dx)+Math.abs(dy)>10)isPanning=true;
+  if(isPanning){camX=camStart.x-dx/zoom;camY=camStart.y-dy/zoom;}
+ }
+});
+
+canvas.addEventListener('pointerup',e=>{
+ const wasPanning=isPanning;
+ delete touches[e.pointerId];
+ if(Object.keys(touches).length===0){isPanning=false;lastPinchDist=0;}
+ // tap to place
+ if(!wasPanning&&Date.now()-pointerDownTime<300&&gameState==='playing'){
+  const g=screenToGrid(e.clientX,e.clientY);
+  placeTile(g.x,g.y);
+ }
+});
+canvas.addEventListener('pointercancel',e=>{delete touches[e.pointerId];});
+
+// mouse wheel zoom
+canvas.addEventListener('wheel',e=>{
+ e.preventDefault();
+ zoom*=e.deltaY<0?1.15:.87;
+ zoom=Math.max(minZoom,Math.min(maxZoom,zoom));
+},{passive:false});
+
+function placeTile(tx,ty){
  if(tx<0||tx>=COLS||ty<0||ty>=ROWS)return;
  const tile=grid[ty][tx];
-
  if(selectedTool==='remove'){
   if(tile==='wall'){grid[ty][tx]='empty';gold+=2;calcFlowFields();}
   else if(tile==='turret'){grid[ty][tx]='empty';gold+=5;calcFlowFields();}
@@ -551,7 +623,7 @@ canvas.addEventListener('pointerdown',e=>{
   if(tile!=='empty'||gold<10)return;
   grid[ty][tx]='pit';gold-=10;
  }
-});
+}
 
 document.getElementById('bWall').onclick=()=>{selectedTool='wall';updateButtons();};
 document.getElementById('bTurret').onclick=()=>{selectedTool='turret';updateButtons();};
