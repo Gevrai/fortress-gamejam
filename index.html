@@ -148,7 +148,8 @@ function bfs(starts){
 }
 
 function calcFlowFields(){
- flowToPrincess=bfs([princessGrabbed?princessPos:princessHome]);
+ const pStart=princessGrabbed?{x:(princessPos.x+.5)|0,y:(princessPos.y+.5)|0}:princessHome;
+ flowToPrincess=bfs([pStart]);
  // flow to nearest portal
  const portals=[];
  for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++)if(grid[y][x]==='portal')portals.push({x,y});
@@ -177,9 +178,9 @@ function turretCost(){return 15+turretCount()*5;}
 function spawnEnemy(px,py,type){
  type=type||'normal';
  let hp,speed,size;
- if(type==='normal'){hp=3+nightNum*2;speed=3.5+nightNum*.4;size=.35;}
- else if(type==='tank'){hp=10+nightNum*5;speed=1.8+nightNum*.2;size=.5;}
- else if(type==='flyer'){hp=2+nightNum;speed=3+nightNum*.3;size=.25;}
+ if(type==='normal'){hp=nightNum===1?2:3+nightNum*2;speed=2+nightNum*.3;size=.35;}
+ else if(type==='tank'){hp=10+nightNum*5;speed=1.2+nightNum*.15;size=.5;}
+ else if(type==='flyer'){hp=2+nightNum;speed=2+nightNum*.2;size=.25;}
  entities.push({x:px+.5,y:py+.5,hp,maxHp:hp,type,
   state:'moving_to_princess',speed,grabTimer:0,
   slowTimer:0,pitCooldown:0,size,flyOffset:0});
@@ -194,6 +195,8 @@ function stepEnemies(dt){
     princessGrabbed=false;princessCarrier=null;
     // princess walks back (instant for simplicity)
     princessPos={...princessHome};
+    grid[princessHome.y][princessHome.x]='princess';
+    calcFlowFields();
    }
    const reward=e.type==='tank'?5:e.type==='flyer'?3:1;
    gold+=reward;score+=10;
@@ -299,12 +302,25 @@ function stepProjectiles(dt){
  for(let i=projectiles.length-1;i>=0;i--){
   const p=projectiles[i];
   p.timer-=dt;
-  // lerp
-  const prog=1-Math.max(0,p.timer)/.2;
+  const dur=p.isPrincessShot?.3:.2;
+  const prog=1-Math.max(0,p.timer)/dur;
   p.cx=p.x+(p.tx-p.x)*prog;
   p.cy=p.y+(p.ty-p.y)*prog;
   if(p.timer<=0){
-   if(p.target&&p.target.hp>0)p.target.hp-=p.dmg;
+   if(p.isPrincessShot){
+    // hit nearest enemy within 1 tile of impact
+    let best=null,bestD=1;
+    for(const e of entities){
+     const dx=e.x-p.tapX,dy=e.y-p.tapY,d=Math.sqrt(dx*dx+dy*dy);
+     if(d<bestD){bestD=d;best=e;}
+    }
+    if(best&&best.hp>0){
+     best.hp-=p.dmg;
+     floatingTexts.push({x:best.x,y:best.y-.5,text:`-${p.dmg}`,timer:.8,color:'#f8f'});
+    }
+   }else{
+    if(p.target&&p.target.hp>0)p.target.hp-=p.dmg;
+   }
    projectiles.splice(i,1);
   }
  }
@@ -501,8 +517,8 @@ function render(){
 
  // projectiles
  for(const p of projectiles){
-  ctx.fillStyle='#ff0';
-  ctx.beginPath();ctx.arc((p.cx||p.x)*TILE,(p.cy||p.y)*TILE,3,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=p.isPrincessShot?'#f8f':'#ff0';
+  ctx.beginPath();ctx.arc((p.cx||p.x)*TILE,(p.cy||p.y)*TILE,p.isPrincessShot?4:3,0,Math.PI*2);ctx.fill();
  }
 
  // floating texts
@@ -517,6 +533,23 @@ function render(){
 
 function drawPrincess(cx,cy){
  const s=TILE*.35;
+ // cooldown ring (drawn behind princess)
+ if(phase==='night'){
+  const r=s*1.7;
+  const frac=Math.max(0,princessAttackCooldown)/1;
+  if(frac>0){
+   // grey background ring
+   ctx.strokeStyle='rgba(255,255,255,.2)';ctx.lineWidth=3;
+   ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
+   // remaining cooldown arc (red)
+   ctx.strokeStyle='#f44';ctx.lineWidth=3;
+   ctx.beginPath();ctx.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+frac*Math.PI*2);ctx.stroke();
+  }else{
+   // ready: glowing yellow ring
+   ctx.strokeStyle=`rgba(255,255,0,${.5+Math.sin(Date.now()/150)*.3})`;ctx.lineWidth=3;
+   ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
+  }
+ }
  // dress
  ctx.fillStyle='#f8a';
  ctx.beginPath();ctx.moveTo(cx-s,cy+s);ctx.lineTo(cx+s,cy+s);ctx.lineTo(cx,cy-s*.5);ctx.fill();
@@ -558,6 +591,7 @@ function screenToGrid(sx,sy){
 
 let touches={},lastPinchDist=0,isPanning=false,panStart={x:0,y:0},camStart={x:0,y:0};
 let pointerDownTime=0,pointerDownPos={x:0,y:0};
+let princessAttackCooldown=0;
 
 canvas.addEventListener('pointerdown',e=>{
  touches[e.pointerId]={x:e.clientX,y:e.clientY};
@@ -603,8 +637,20 @@ canvas.addEventListener('pointerup',e=>{
  const wasPanning=isPanning;
  delete touches[e.pointerId];
  if(Object.keys(touches).length===0){isPanning=false;lastPinchDist=0;}
- // tap to place
+ // tap to place or attack enemy
  if(!wasPanning&&Date.now()-pointerDownTime<300&&gameState==='playing'){
+  // during night, princess shoots toward tap
+  if(phase==='night'&&princessAttackCooldown<=0){
+   const rect=canvas.getBoundingClientRect();
+   const wx=(e.clientX-rect.left-canvas.width/2)/zoom+camX;
+   const wy=(e.clientY-rect.top-canvas.height/2)/zoom+camY;
+   const tx=wx/BASE_TILE,ty=wy/BASE_TILE;
+   const px=princessPos.x+.5,py=princessPos.y+.5;
+   const dmg=2+Math.floor(nightNum/2);
+   projectiles.push({x:px,y:py,tx,ty,timer:.3,target:null,dmg,isPrincessShot:true,tapX:tx,tapY:ty});
+   princessAttackCooldown=1;
+   return;
+  }
   const g=screenToGrid(e.clientX,e.clientY);
   placeTile(g.x,g.y);
  }
@@ -673,6 +719,7 @@ function loop(time){
  lastTime=time;
 
  if(gameState==='playing'){
+  if(princessAttackCooldown>0)princessAttackCooldown-=dt;
   if(phase==='night'){
    stepWaves(dt);
    stepEnemies(dt);
