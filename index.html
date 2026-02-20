@@ -43,9 +43,12 @@ Enemies spawn from <b style="color:#a0f">purple portals</b> and try to kidnap he
 &bull; Place <b style="color:#a52">pits</b> (10g) on ground to slow &amp; damage<br>
 &bull; Tap "Start Night" when ready<br><br>
 <b style="color:#ff0">Enemies:</b><br>
-&bull; <b style="color:#e33">Normal</b> — fast runners<br>
-&bull; <b style="color:#833">Tanks</b> — slow but tough<br>
-&bull; <b style="color:#a6f">Flyers</b> — ignore walls, but weak<br><br>
+&bull; <b style="color:#e33">Normal</b> — standard runners<br>
+&bull; <b style="color:#833">Tank</b> — slow, very tough<br>
+&bull; <b style="color:#a6f">Flyer</b> — ignores walls<br>
+&bull; <b style="color:#ff4">Sprinter</b> — 1HP but 3× speed, instant grab<br>
+&bull; <b style="color:#ddf">Ghost</b> — phases through single walls<br>
+&bull; <b style="color:#4f4">Healer</b> — restores HP to nearby enemies<br><br>
 <b style="color:#ff0">Controls:</b> Tap to place, drag to pan, pinch to zoom<br>
 <b style="color:#0f0">Tip:</b> Longer mazes = more gold from junctions!
 </p>
@@ -61,7 +64,7 @@ let phase='day',nightNum=0,gold=50,score=0;
 let selectedTool='wall';
 let flowToPrincess=null,flowToPortals=null;
 let princessPos={x:10,y:16},princessHome={x:10,y:16};
-let princessGrabbed=false,princessCarrier=null;
+let princessGrabbed=false,princessCarrier=null,princessWalking=false;
 let waveTimer=0,waveCount=0,wavesTotal=0,nightActive=false;
 let gameState='title'; // title, playing, win, lose
 let spawnQueue=[];
@@ -75,7 +78,7 @@ function resize(){
  const fitZoom=Math.min(canvas.width/(COLS*BASE_TILE),canvas.height/(ROWS*BASE_TILE));
  minZoom=fitZoom*.8;maxZoom=fitZoom*3;
  if(zoom<minZoom)zoom=minZoom;
- if(!window._zoomInit){zoom=fitZoom;camX=(COLS*BASE_TILE)/2;camY=(ROWS*BASE_TILE)/2;window._zoomInit=true;}
+ if(!window._zoomInit){zoom=fitZoom*.75;camX=(COLS*BASE_TILE)/2;camY=(ROWS*BASE_TILE)/2;window._zoomInit=true;}
 }
 window.addEventListener('resize',resize);
 
@@ -85,7 +88,7 @@ function initGrid(){
  for(let y=0;y<ROWS;y++){grid[y]=[];for(let x=0;x<COLS;x++)grid[y][x]='empty';}
  princessPos={x:6,y:10};princessHome={x:6,y:10};
  grid[princessHome.y][princessHome.x]='princess';
- princessGrabbed=false;princessCarrier=null;
+ princessGrabbed=false;princessCarrier=null;princessWalking=false;
  entities=[];projectiles=[];floatingTexts=[];spawnQueue=[];
  // scatter terrain
  const terrainTypes=['tree','rock','water'];
@@ -93,8 +96,9 @@ function initGrid(){
  while(placed<60){
   const x=Math.random()*COLS|0,y=Math.random()*ROWS|0;
   if(grid[y][x]!=='empty')continue;
-  // keep a clear zone around princess
+  // keep a clear zone around princess and off edges (so portals can always spawn)
   if(Math.abs(x-princessHome.x)<=2&&Math.abs(y-princessHome.y)<=2)continue;
+  if(x===0||x===COLS-1||y===0||y===ROWS-1)continue;
   const t=terrainTypes[Math.random()*3|0];
   grid[y][x]=t;
   placed++;
@@ -148,7 +152,7 @@ function bfs(starts){
 }
 
 function calcFlowFields(){
- const pStart=princessGrabbed?{x:(princessPos.x+.5)|0,y:(princessPos.y+.5)|0}:princessHome;
+ const pStart=(princessGrabbed||princessWalking)?{x:(princessPos.x+.5)|0,y:(princessPos.y+.5)|0}:princessHome;
  flowToPrincess=bfs([pStart]);
  // flow to nearest portal
  const portals=[];
@@ -178,12 +182,16 @@ function turretCost(){return 15+turretCount()*5;}
 function spawnEnemy(px,py,type){
  type=type||'normal';
  let hp,speed,size;
- if(type==='normal'){hp=nightNum===1?2:3+nightNum*2;speed=2+nightNum*.3;size=.35;}
+ const base=2+nightNum*.5;
+ if(type==='normal'){hp=nightNum===1?2:3+nightNum*2;speed=base;size=.35;}
  else if(type==='tank'){hp=10+nightNum*5;speed=1.2+nightNum*.15;size=.5;}
  else if(type==='flyer'){hp=2+nightNum;speed=2+nightNum*.2;size=.25;}
+ else if(type==='sprinter'){hp=1;speed=base*3;size=.28;}
+ else if(type==='ghost'){hp=3+nightNum;speed=base*1.5;size=.3;}
+ else if(type==='healer'){hp=8+nightNum*2;speed=base*.8;size=.32;}
  entities.push({x:px+.5,y:py+.5,hp,maxHp:hp,type,
   state:'moving_to_princess',speed,grabTimer:0,
-  slowTimer:0,pitCooldown:0,size,flyOffset:0});
+  slowTimer:0,pitCooldown:0,size,flyOffset:0,wallsInRow:0});
 }
 
 function stepEnemies(dt){
@@ -193,9 +201,8 @@ function stepEnemies(dt){
    // drop princess if carrying
    if(e===princessCarrier){
     princessGrabbed=false;princessCarrier=null;
-    // princess walks back (instant for simplicity)
-    princessPos={...princessHome};
-    grid[princessHome.y][princessHome.x]='princess';
+    // princess stays where the enemy died, then walks home
+    princessWalking=true;
     calcFlowFields();
    }
    const reward=e.type==='tank'?5:e.type==='flyer'?3:1;
@@ -214,14 +221,26 @@ function stepEnemies(dt){
   }
   if(e.pitCooldown>0)e.pitCooldown-=dt;
 
+  // healer aura — heal nearby allies
+  if(e.type==='healer'){
+   for(const other of entities){
+    if(other===e)continue;
+    const hx=other.x-e.x,hy=other.y-e.y;
+    if(hx*hx+hy*hy<1.5*1.5&&other.hp<other.maxHp){
+     other.hp=Math.min(other.maxHp,other.hp+dt);
+    }
+   }
+  }
+
   if(e.state==='moving_to_princess'){
    const flow=flowToPrincess;
    if(!flow)continue;
    moveAlongFlow(e,flow,speed);
    // check if reached princess
    const dx=e.x-princessPos.x-.5,dy=e.y-princessPos.y-.5;
-   if(!princessGrabbed&&dx*dx+dy*dy<.3){
-    e.state='grabbing';e.grabTimer=1;
+   if(!princessGrabbed&&!princessWalking&&dx*dx+dy*dy<.3){
+    e.state='grabbing';
+    e.grabTimer=e.type==='sprinter'?0:1; // sprinter grabs instantly
    }
   }else if(e.state==='grabbing'){
    e.grabTimer-=dt;
@@ -246,6 +265,36 @@ function stepEnemies(dt){
 }
 
 function moveAlongFlow(e,flow,speed){
+ if(e.type==='ghost'){
+  // Straight-line toward target; phases through 1 consecutive wall, blocked by 2
+  let tx,ty;
+  if(e.state==='carrying_to_portal'){
+   let best=Infinity;tx=e.x;ty=e.y;
+   for(let gy=0;gy<ROWS;gy++)for(let gx=0;gx<COLS;gx++)if(grid[gy][gx]==='portal'){
+    const d=(e.x-gx-.5)**2+(e.y-gy-.5)**2;if(d<best){best=d;tx=gx+.5;ty=gy+.5;}
+   }
+  }else{tx=princessPos.x+.5;ty=princessPos.y+.5;}
+  const dx=tx-e.x,dy=ty-e.y,dist=Math.sqrt(dx*dx+dy*dy);
+  if(dist<.05)return;
+  const nx=e.x+dx/dist*Math.min(speed,dist);
+  const ny=e.y+dy/dist*Math.min(speed,dist);
+  const ntx=nx|0,nty=ny|0;
+  const curTile=grid[e.y|0]&&grid[e.y|0][e.x|0];
+  const curWall=curTile==='wall'||curTile==='turret'||curTile==='tree'||curTile==='rock'||curTile==='water';
+  const nextTile=ntx>=0&&ntx<COLS&&nty>=0&&nty<ROWS?grid[nty][ntx]:'';
+  const nextWall=nextTile==='wall'||nextTile==='turret'||nextTile==='tree'||nextTile==='rock'||nextTile==='water';
+  // track consecutive wall tiles crossed
+  const prevTX=e.x|0,prevTY=e.y|0;
+  if(nextWall&&curWall){return;} // double wall blocks
+  e.x=nx;e.y=ny;
+  const newTX=e.x|0,newTY=e.y|0;
+  if(newTX!==prevTX||newTY!==prevTY){
+   const t=grid[newTY]&&grid[newTY][newTX];
+   const inWall=t==='wall'||t==='turret'||t==='tree'||t==='rock'||t==='water';
+   e.wallsInRow=inWall?(e.wallsInRow||0)+1:0;
+  }
+  return;
+ }
  if(e.type==='flyer'){
   // fly straight toward target (ignore walls)
   let tx,ty;
@@ -339,18 +388,37 @@ function stepFloatingTexts(dt){
 function startNight(){
  if(phase==='night')return;
  phase='night';nightNum++;
- const total=(4+nightNum*3)*10;
- wavesTotal=total;waveCount=0;
- spawnQueue=[];
+ spawnQueue=[];waveCount=0;
  const portals=[];
  for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++)if(grid[y][x]==='portal')portals.push({x,y});
- for(let i=0;i<total;i++){
-  const p=portals[i%portals.length];
-  let type='normal';
-  if(i%5===4)type='tank';
-  else if(i%4===3)type='flyer';
-  spawnQueue.push({x:p.x,y:p.y,delay:.5+i*.3,type});
+
+ function addWave(seq,startTime,interval){
+  for(let i=0;i<seq.length;i++){
+   const p=portals[i%portals.length];
+   spawnQueue.push({x:p.x,y:p.y,delay:startTime+i*interval,type:seq[i]});
+  }
  }
+
+ const N='normal',T='tank',F='flyer',S='sprinter',G='ghost',H='healer';
+ if(nightNum===1){
+  addWave([N,N,N,N,N,N,N,N,N,N,N,N],1,1.5);
+ }else if(nightNum===2){
+  addWave([N,N,N,N,S,N,N,N,N,T,N,N,N,S,T,S,T,S,T,N,N,N],1,1.0);
+ }else if(nightNum===3){
+  addWave([N,N,F,N,N,F,S,N,N,F,N,N,F,S,N,N,F,N,N,F,S,N,F,S,N,F,S,N,F,N],1,0.7);
+ }else if(nightNum===4){
+  const g1=[N,N,N,N,N,N,N,N,F,F,F,T,T,H,N,N,N,G,G,F,S];
+  const g2=[G,G,N,N,N,T,T,F,F,F,H,N,N,N,N,N,G,G,H,T];
+  addWave(g1,1,0.5);
+  addWave(g2,1+g1.length*0.5+4,0.5);
+ }else if(nightNum===5){
+  const r1=[S,S,N,N,N,N,F,F,H,T,T,T,N,N,N,G,G,S,F,F,F,F,T,T,N,N,N,N,N,H,G,G,S];
+  const r2=[S,S,N,N,N,N,N,G,G,G,T,T,T,F,F,H,N,N,N,N,G,G,T,T,T,S,S,F,F,F,F,N,N,N,H,T,T];
+  addWave(r1,1,0.3);
+  addWave(r2,1+r1.length*0.3+5,0.2);
+ }
+
+ wavesTotal=spawnQueue.length;
  nightActive=true;waveTimer=0;
  calcFlowFields();
  selectedTool='turret';updateButtons();
@@ -371,9 +439,12 @@ function stepWaves(dt){
   if(nightNum>=5){gameState='win';return;}
   phase='day';
   addPortal();
-  // restore princess if not grabbed
-  if(!princessGrabbed){grid[princessHome.y][princessHome.x]='princess';}
-  gold+=15;
+  // restore princess if not grabbed or mid-walk
+  princessWalking=false;
+  princessPos={...princessHome};
+  grid[princessHome.y][princessHome.x]='princess';
+  const nightBonus=[0,25,20,20,25,0];
+  gold+=nightBonus[nightNum]||0;
   selectedTool='wall';updateButtons();
   calcFlowFields();
  }
@@ -469,7 +540,7 @@ function render(){
  }
 
  // princess if grabbed (draw at current pos)
- if(princessGrabbed){
+ if(princessGrabbed||princessWalking){
   drawPrincess(princessPos.x*TILE+TILE/2,princessPos.y*TILE+TILE/2);
  }
 
@@ -493,6 +564,32 @@ function render(){
    ctx.fillStyle='#c8f';
    ctx.beginPath();ctx.ellipse(ex-r*.8,ey-wf,r*.5,r*.3,-.3,0,Math.PI*2);ctx.fill();
    ctx.beginPath();ctx.ellipse(ex+r*.8,ey-wf,r*.5,r*.3,.3,0,Math.PI*2);ctx.fill();
+  }else if(e.type==='sprinter'){
+   ctx.fillStyle=e.state==='carrying_to_portal'?'#fa0':'#ff4';
+   ctx.beginPath();ctx.arc(ex,ey,r,0,Math.PI*2);ctx.fill();
+   // speed lines
+   ctx.strokeStyle='rgba(255,255,0,.5)';ctx.lineWidth=1;
+   ctx.beginPath();ctx.moveTo(ex-r*1.2,ey-r*.3);ctx.lineTo(ex-r*.5,ey-r*.3);ctx.stroke();
+   ctx.beginPath();ctx.moveTo(ex-r*1.4,ey+r*.1);ctx.lineTo(ex-r*.5,ey+r*.1);ctx.stroke();
+  }else if(e.type==='ghost'){
+   ctx.globalAlpha=0.65;
+   ctx.fillStyle=e.state==='carrying_to_portal'?'rgba(255,200,100,.7)':'rgba(220,220,255,.7)';
+   ctx.beginPath();ctx.arc(ex,ey,r,0,Math.PI*2);ctx.fill();
+   // wavy bottom
+   ctx.fillStyle=e.state==='carrying_to_portal'?'rgba(255,200,100,.5)':'rgba(200,200,255,.5)';
+   ctx.beginPath();
+   ctx.arc(ex,ey+r*.5,r*.6,0,Math.PI);ctx.fill();
+   ctx.globalAlpha=1;
+  }else if(e.type==='healer'){
+   // heal aura ring
+   ctx.strokeStyle='rgba(80,255,80,.3)';ctx.lineWidth=3;
+   ctx.beginPath();ctx.arc(ex,ey,1.5*TILE,0,Math.PI*2);ctx.stroke();
+   ctx.fillStyle=e.state==='carrying_to_portal'?'#fa0':'#4f4';
+   ctx.beginPath();ctx.arc(ex,ey,r,0,Math.PI*2);ctx.fill();
+   // cross symbol
+   ctx.fillStyle='#fff';
+   ctx.fillRect(ex-r*.12,ey-r*.55,r*.24,r*.55*2);
+   ctx.fillRect(ex-r*.55,ey-r*.12,r*.55*2,r*.24);
   }else{
    ctx.fillStyle=e.state==='carrying_to_portal'?COLORS.enemyCarry:COLORS.enemy;
    ctx.beginPath();ctx.arc(ex,ey,r,0,Math.PI*2);ctx.fill();
@@ -720,7 +817,21 @@ function loop(time){
 
  if(gameState==='playing'){
   if(princessAttackCooldown>0)princessAttackCooldown-=dt;
+ if(princessWalking){
+  const tx=princessHome.x+.5,ty=princessHome.y+.5;
+  const cx=princessPos.x+.5,cy=princessPos.y+.5;
+  const dx=tx-cx,dy=ty-cy,dist=Math.sqrt(dx*dx+dy*dy);
+  const spd=2*dt;
+  if(dist<=spd){
+   princessPos={x:princessHome.x,y:princessHome.y};
+   princessWalking=false;
+   grid[princessHome.y][princessHome.x]='princess';
+  }else{
+   princessPos={x:princessPos.x+dx/dist*spd,y:princessPos.y+dy/dist*spd};
+  }
+ }
   if(phase==='night'){
+   if(princessGrabbed||princessWalking)calcFlowFields();
    stepWaves(dt);
    stepEnemies(dt);
    stepTurrets(dt);
@@ -734,7 +845,7 @@ function loop(time){
  if(gameState==='win'){
   render();
   showOverlay('VICTORY!',`You defended the princess!<br>Score: ${score}<br>Gold remaining: ${gold}`,'Play Again',()=>{
-   gameState='playing';initGrid();addPortal();gold=50;score=0;nightNum=0;phase='day';
+   gameState='playing';initGrid();addPortal();addPortal();addPortal();gold=50;score=0;nightNum=0;phase='day';
    selectedTool='wall';updateButtons();calcFlowFields();
   });
   gameState='win_shown';
@@ -742,7 +853,7 @@ function loop(time){
  if(gameState==='lose'){
   render();
   showOverlay('DEFEAT!',`The princess was kidnapped!<br>Survived ${nightNum-1} nights<br>Score: ${score}`,'Try Again',()=>{
-   gameState='playing';initGrid();addPortal();gold=50;score=0;nightNum=0;phase='day';
+   gameState='playing';initGrid();addPortal();addPortal();addPortal();gold=50;score=0;nightNum=0;phase='day';
    selectedTool='wall';updateButtons();calcFlowFields();
   });
   gameState='lose_shown';
